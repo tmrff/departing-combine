@@ -584,3 +584,7 @@ extension ViewModel {
 - Within `next()`, utilise the stored continuation to yield a random integer into the async stream created by numbers
 
 Run the app. Now we have simple communication between `ViewModel` and `ContentView`.
+
+## Acknowledgements
+
+- The content of this document was created based on notes taken from the a YouTube video series keynote "Combine to Async" by Daniel Steinberg.
