@@ -465,3 +465,122 @@ extension ViewModel {
     }
 }
 ```
+
+## Removing Combine - part three
+
+In this part we will remove the NotificationCenter and instead utilise an ordinary property within the `ViewModel`. Changes will be communicated through an async sequence, specifically an async stream.
+
+When the user taps the Next button:
+- We invoke the `next()` method, which posts a notification with `notificationName`
+This notification includes a random number between 1 and 50 stored in the `userInfo` dictionary
+
+
+On the receiving end:
+- We observe notifications with the same `notificationName`
+- Upon receiving a notification, we extract the `userInfo` dictionary
+- From the `userInfo` dictionary, we retrieve our random number and verify its type to ensure it is an `Int`
+- The `Int` is assigned to `numbers` which is an async sequence of integers that ContentView listens to and uses accordingly
+
+The process of generating a random number, packaging it within a dictionary, and then posting it via NotificationCenter, only to receive the notification and extract the random number, seems unnecessarily convoluted.
+
+### Small Refactor
+
+Let's divide numbers into two distinct parts.
+
+First, refactor the top part of `ViewModel`:
+
+```swift
+class ViewModel {
+    private let notifications = NotificationCenter.default
+        .notifications(named: notificationName)
+```
+- Rename `numbers` to `notifications`
+- Change `notifications` (old `numbers`) to a private property
+
+Next, adjust the bottom part:
+
+```swift
+lazy private(set) var numbers = notifications
+    .compactMap(\.userInfo)
+    .compactMap { userInfo in userInfo[counterKey] as? Int }
+}
+```
+- Replace numbers with notifications
+- Assign the result of the transformation to `numbers`
+
+At this stage the code will compile and function as before. However, we will soon change the `numbers` part, breaking things in the process.
+
+### Introducing AsyncStream
+
+In Swift, the `Sequence` protocol is fundamental:
+- It represents a sequence of elements of a specific type (`Element`)
+- Every `Sequence` must have an associated `Iterator`
+- An `Iterator` provides the `next()` method, returning an optional `Element` (`next() -> Element?`), used in for-in loops until it returns nil
+
+When working with `Sequence`, you create concrete types that conform to it, such as `Array`. For instance, `Array<Int>` conforms to `Sequence`. In Swift, we often use syntactic sugar (`[Int]`) for arrays.
+
+In the asynchronous world, we have `AsyncSequence`:
+- It also requires an `Element`, defining an async sequence of elements
+- Instead of an `Iterator`, we have an `AsyncIterator`, since we don't know when the next element will be available. Its `next()` method is asynchronous (`next() async -> Element?`)
+
+To create concrete instances of `AsyncSequence`, like we do with arrays in the non-async world, we use types such as `AsyncStream`. `AsyncStream` is particularly useful, acting as our asynchronous equivalent of an array, providing an `AsyncStream` of `Ints` (`AsyncStream<Int>: AsyncSequence`).
+
+Similar to an `Array`, we can create an `AsyncStream`. This stream allows us to add items periodically and observe them as they flow through. How does this work? When we initialise an `AsyncStream`, we receive a mechanism known as a `continuation`. We utilise this `continuation` by invoking `continuation.yield()` to insert values into the stream, specifying the values that we want to place into it.
+
+### AsyncStream Implementation
+
+```swift
+class ViewModel {
+    private let notifications = NotificationCenter.default
+        .notifications(named: notificationName)
+
+    lazy private(set) var numbers = AsyncStream(Int.self) { continuation in
+        Task {
+            for await notification in notifications {
+                if let userInfo = notification.userInfo, 
+                   let number = userInfo[counterKey] as? Int {
+                       continuation.yield(number)
+                }
+            }
+        }
+    }
+}
+```
+- The `numbers` property is an AsyncStream of integers.
+  - This line declares `numbers` as an `AsyncStream` that emits `Ints`
+- Closure argument (`{ continuation in ... }`)
+  - The closure provided to `AsyncStream` initialises the stream and receives a continuation object
+- Using NotificationCenter to populate the stream
+  - We use NotificationCenter to get the elements that we add to the stream. We will `for await` notification in our async sequence notifications
+- Enclosing in a `Task` for asynchronous context
+  - The asynchronous iteration (`await`) within the loop necessitates encapsulation in a `Task` to manage asynchronous behaviour
+- Processing each notification
+  - Each notification is processed similarly to before. Extract `userInfo` and validate the presence of `counterKey` holding an `Int`
+- Adding `numbers` to the stream (`continuation.yield(number)`)
+  - Upon confirming a valid number, the continuation yields (`yield`) that number to the `AsyncStream`
+
+If you run the app now it will work as before, but it still seems like there's unnecessary complexity with NotificationCenter.
+
+### Removing NotificationCenter
+
+Remove all NotificationCenter related code and modify the resulting ViewModel:
+
+```swift
+class ViewModel {
+    private var continuation: AsyncStream<Int>.Continuation?
+    lazy private(set) var numbers = AsyncStream(Int.self) { continuation in
+        self.continuation = continuation
+    }
+}
+
+extension ViewModel {
+    func next() {
+        continuation?.yield(Int.random(in: 1...50))
+    }
+}
+```
+- Create a property `continuation` to store the `continuation` object, allowing access from within the `next()` method
+- In the closure provided to `AsyncStream`, assign `self.continuation` to the continuation parameter received during initialisation of the async stream. This setup prepares numbers to receive values through `continuation.yield()`
+- Within `next()`, utilise the stored continuation to yield a random integer into the async stream created by numbers
+
+Run the app. Now we have simple communication between `ViewModel` and `ContentView`.
