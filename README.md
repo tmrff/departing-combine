@@ -256,3 +256,212 @@ class ViewModel {
     }
 }
 ```
+## Removing Combine - part two
+
+
+It's time to begin eliminating Combine and `@Published` from our `ViewModel`. Instead, communication between the `ViewModel` and `ContentView` will be handled via NotificationCenter.
+
+Previously, our ViewModel utilised Combine and `@Published` to create an integer publisher, which we used inside of an async sequence to feed the `ContentView`.
+
+Next, we'll modify the functionality of the 'Next' button. Rather than directly assigning the `counter` from a random variable, we will now post a notification:
+
+```swift
+import Combine
+import Foundation
+
+class ViewModel {
+    @Published private var counter = 0
+    lazy private(set) var numbers = $counter.values
+    let notificationName = Notification.Name("CounterNotificaiton")
+    let counterKey = "counterKey"
+    
+    func next() {
+        NotificationCenter.default
+            .post(name: notificationName,
+                  object: self,
+                  userInfo: [counterKey: Int.random(in: 1...50)]
+            )
+    }
+}
+
+````
+
+- Import `Foundation`
+- Define `notificationName` constant for convenience
+- In the `next()` method, a notification with the specified `notificationName` is post
+- The current instance of `ViewModel` acts as the source posting the notification
+- Define `counterKey` constant for accessing the user info dictionary key
+- Post the random Int as the entry in the dictionary with the key `counterKey`
+
+> [!NOTE]  
+> Note that this code does not involve async operations. Posting a notification happens synchronously at a specific time.
+
+Since we're not observing notifications to update the counter and consequently the `numbers` property, running the app won't reflect changes despite posting a new random number
+
+In a new extension for ViewModel register for notifications:
+
+```swift
+extension ViewModel {
+    private func registerForNotifications() {
+        NotificationCenter.default
+            .addObserver(forName: notificationName,
+                         object: self,
+                         queue: nil) { notification in
+            if let userInfo = notification.userInfo,
+               let counter = userInfo[self.counterKey] as? Int {
+              self.counter = counter
+            }
+          }
+    }
+}
+````
+- Add new function `registerForNotifications()`
+- `registerForNotifications()` uses `NotificationCenter.default` and adds an observer
+- When a notification matching `notificationName` is received, a closure is executed. 
+- Within this closure:
+   - Check if the notification contains a `userInfo` dictionary
+   -  If the dictionary exists, attempt to retrieve the value associated with the `counterKey`
+    - If successful, cast this value to an integer and assign it to `counter`
+
+Before running the app make sure to call `registerForNotifications()`:
+
+```swift
+class ViewModel {
+    @Published private var counter = 0
+    lazy private(set) var numbers = $counter.values
+    let notificationName = Notification.Name("CounterNotificaiton")
+    let counterKey = "counterKey"
+
+    init() {
+        registerForNotifications()
+    }
+    
+    // The rest of ViewModel implementation
+}
+```
+- Add an initialiser for `ViewModel`
+- Call `registerForNotifications()` inside the initialiser
+
+If you run the app now things will work as before. 
+
+### Async Sequence Notifications
+
+Make the following changes to the `ViewModel`. It will break and in turn also break `ContentView` because the data source `numbers` will be removed:
+
+```swift
+let notificationName = Notification.Name("CounterNotificaiton")
+let counterKey = "counterKey"
+
+class ViewModel {
+
+}
+
+extension ViewModel {
+    private func registerForNotifications() {
+        NotificationCenter.default
+            .addObserver(forName: notificationName,
+                         object: self,
+                         queue: nil) { notification in
+            if let userInfo = notification.userInfo,
+               let counter = userInfo[counterKey] as? Int {
+            }
+          }
+    }
+}
+```
+- Remove the `@Published` property `counter` from `ViewModel`
+- Within the closure of `registerForNotifications()`'s observer, delete the assignment `self.counter = counter`
+- Delete the `numbers` property entirely from `ViewModel`
+- Delete the `import Combine` statement as it is no longer needed by `ViewModel` 
+- Delete the initialiser in `ViewModel` and the invocation of `registerForNotifications()`
+- Move `let notificationName = Notification.Name("CounterNotificaiton")` and `let counterKey = "counterKey"` outside of the `ViewModel` class
+- Adjust the usage of `counterKey` by removing `self.` within `registerForNotifications()` since the constants are no longer members of `ViewModel`
+
+Now that we've decimated our `ViewModel`, we'll reconstruct it using asynchronous sequences of notifications from NotificationCenter. This approach leverages notifications for asynchronous operations.
+
+Add a new property to `ViewModel`:
+
+```swift
+class ViewModel {
+    let numbers = NotificationCenter.default
+        .notifications(named: notificationName)
+}
+```
+- Introduce a new `numbers` property within `ViewModel`, defined as `NotificationCenter.default.notifications(named: notificationName)`
+- This property utilises a new method of NotificationCenter, returning an `AsyncSequence<Notification, Never>`
+
+### Async Sequence of Notifications to Async Sequence of Ints 
+
+Currently our `numbers` property is of type `AsyncSequence<Notification, Never>`, while our `ContentView` requires `AsyncSequence<Int, Never>`. 
+
+To align `numbers` with this requirement, let's analyse the closure of `addObserver` in `registerForNotifications()` and see how we can modify `numbers` to achieve the same logic.
+
+  - The first statement in the closure is `if let userInfo = notification.userInfo`
+- This statement stops if `notification.userInfo` is `nil`; if not `nil`, it unwraps and assigns it to `userInfo`
+- We can achieve this behaviour with sequences like `numbers` using the `compactMap` operator
+- Using `.compactMap` with key path `userInfo`,  we are doing the same as the `if let`. Taking every notification and if it's not `nil`, extracting the `userInfo` dictionary.
+
+```swift
+class ViewModel {
+    let numbers = NotificationCenter.default
+        .notifications(named: notificationName)
+        .compactMap(\.userInfo)
+}
+```
+- Add `compactMap(\.userInfo)` operator to `numbers`
+
+Now `numbers` is of type `AsyncSequence<[:], Never>`
+
+Let's look at the second statement in the closure of `addObserver` in `registerForNotifications()` and then modify `numbers` to have the same behaviour:
+
+- The second statement in the closure checks `if let counter = userInfo[counterKey] as? Int`
+- This line ensures there is a value in the `userInfo` dictionary for the key `counterKey` and verifies if its type is `Int`
+- Similarly, we can adapt numbers to utilise `compactMap` to achieve equivalent behaviour
+
+```swift
+class ViewModel {
+    let numbers = NotificationCenter.default
+        .notifications(named: notificationName)
+        .compactMap(\.userInfo)
+        .compactMap { userInfo in userInfo[counterKey] as? Int }
+}
+```
+- Add the `.compactMap { userInfo in userInfo[counterKey] as? Int }` operator to numbers to extract and map the integer value associated with `counterKey` from each notification's `userInfo`
+
+Now that numbers is of type `AsyncSequence<Int, Never>`, it precisely matches what `ContentView` expects. Consequently, `registerForNotifications()` can be deleted.
+
+Now run the app. Everything should function as it did before, even though ViewModel no longer uses Combine or `@Published`.
+
+### Summary
+
+When the `Next` button is tapped, a notification is posted containing a `userInfo` dictionary with a random integer.
+
+On the receiving end:
+- We start with `AsyncSequence<Notification, Never>`
+- Transform it to `AsyncSequence<[AnyHashable: Any], Never>`
+- Further transform it to an `AsyncSequence<Int, Never>`, which matches the type expected by `ContentView`
+
+
+Given that `ContentView` remains unchanged, here is the new version of the `ViewModel`:
+
+```swift
+let notificationName = Notification.Name("CounterNotificaiton")
+let counterKey = "counterKey"
+
+class ViewModel {
+    let numbers = NotificationCenter.default
+        .notifications(named: notificationName)
+        .compactMap(\.userInfo)
+        .compactMap { userInfo in userInfo[counterKey] as? Int }
+}
+
+extension ViewModel {
+     func next() {
+        NotificationCenter.default
+            .post(name: notificationName,
+                  object: self,
+                  userInfo: [counterKey: Int.random(in: 1...50)]
+            )
+    }
+}
+```
